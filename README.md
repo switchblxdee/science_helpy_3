@@ -62,7 +62,6 @@
     OPENROUTER_API_KEY=your_openrouter_key
     OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
     TAVILY_API_KEY=your_tavily_key  # Для поиска в интернете (Writer Agent)
-    LANGSMITH_API_KEY=your_langsmith_key # Опционально, для трейсинга
     ```
 
 ## Использование
