@@ -11,7 +11,7 @@ from datetime import date
 import io
 from PIL import Image
 
-from agents.describe_agent import DescribeAgent
+# from science_helpy_3.describe_agent import DescribeAgent
 from agents.review_agent import EvalAgent
 from agents.writer_agent import WriterAgent
 from agents.coordinator_agent import CoordinatorAgent

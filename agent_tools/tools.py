@@ -26,14 +26,14 @@ def search_arxiv_papers(
     Search for academic papers on arXiv.
     
     Args:
-        query: Topic (e.g. 'DeepSeek', 'LLM'). 
-               You can use complex queries like "DeepSeek AND LLM" or "cat:cs.CL AND (ti:Llama OR ti:Mistral)".
-        limit: Max results (default 10). Increase to 20-30 for broad topics.
+        query: Topic (e.g. 'DeepSeek', 'LLM', "Sparse Attention"). 
+               You can use queries like "Qwen3" or "Qwen 3". "DeepSeek-V3" or "DeepSeek V3" etc.
+        limit: Max results (default 20). Increase to 20-30 for broad topics.
         sort_strategy: 'relevance' (default), 'submittedDate' (newest), 'lastUpdatedDate'.
         date_from: Start date 'YYYY-MM-DD'.
         date_to: End date 'YYYY-MM-DD'.
         search_in_title_only: Set True to find official/main papers (e.g. "DeepSeek-V3"). 
-                              Helps filter out papers that just *mention* the query.
+                              Helps filter out papers that just *mention* the query. Try in after of first search_arxiv_papers.
     """
     try:
         client = arxiv.Client()
@@ -175,69 +175,69 @@ def download_arxiv_tex(arxiv_id: str) -> str:
     except Exception as e:
         return f"Unexpected error: {str(e)}"
 
-@tool("manage_files")
-def manage_files(action: str, content: str = None, destination: str = None, path: str = "/Users/switchblade/Documents/vs_code/science_helpy_3/downloads") -> str:
-    """
-    Универсальный инструмент для работы с файлами в рабочей директории.
+# @tool("manage_files")
+# def manage_files(action: str, content: str = None, destination: str = None, path: str = "/Users/switchblade/Documents/vs_code/science_helpy_3/downloads") -> str:
+#     """
+#     Универсальный инструмент для работы с файлами в рабочей директории.
     
-    Args:
-        action: 'list' (показать файлы), 'read' (читать), 'write' (создать/редактировать), 
-                'move' (переименовать/переместить), 'delete' (удалить).
-        path: Путь к файлу или папке.
-        content: Текст для записи (только для action='write').
-        destination: Новый путь (только для action='move').
-    """
-    p = Path(path)
+#     Args:
+#         action: 'list' (показать файлы), 'read' (читать), 'write' (создать/редактировать), 
+#                 'move' (переименовать/переместить), 'delete' (удалить).
+#         path: Путь к файлу или папке.
+#         content: Текст для записи (только для action='write').
+#         destination: Новый путь (только для action='move').
+#     """
+#     p = Path(path)
     
-    try:
-        if action == "list":
-            if not p.exists(): return f"Ошибка: Путь {path} не существует."
-            items = []
-            for item in p.iterdir():
-                items.append(f"{item.name}")
-            return "\n".join(items) if items else "Папка пуста."
+#     try:
+#         if action == "list":
+#             if not p.exists(): return f"Ошибка: Путь {path} не существует."
+#             items = []
+#             for item in p.iterdir():
+#                 items.append(f"{item.name}")
+#             return "\n".join(items) if items else "Папка пуста."
 
-        elif action == "read":
-            if not p.is_file(): return f"Ошибка: {path} не является файлом."
-            binary_extensions = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-            if p.suffix.lower() in binary_extensions:
-                return (
-                    f"Ошибка: файл '{p.name}' является бинарным ({p.suffix}) и не может быть прочитан как текст. "
-                    f"Для PDF используй инструмент parse_pdf_file. "
-                    f"Для изображений используй агента [DESCRIBE]."
-                )
-            with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            MAX_READ_CHARS = 20_000
-            if len(content) > MAX_READ_CHARS:
-                content = content[:MAX_READ_CHARS] + f"\n\n[...обрезано, показано {MAX_READ_CHARS} из {len(content)} символов]"
-            return content
+#         elif action == "read":
+#             if not p.is_file(): return f"Ошибка: {path} не является файлом."
+#             binary_extensions = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+#             if p.suffix.lower() in binary_extensions:
+#                 return (
+#                     f"Ошибка: файл '{p.name}' является бинарным ({p.suffix}) и не может быть прочитан как текст. "
+#                     f"Для PDF используй инструмент parse_pdf_file. "
+#                     f"Для изображений используй агента [DESCRIBE]."
+#                 )
+#             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+#                 content = f.read()
+#             MAX_READ_CHARS = 20_000
+#             if len(content) > MAX_READ_CHARS:
+#                 content = content[:MAX_READ_CHARS] + f"\n\n[...обрезано, показано {MAX_READ_CHARS} из {len(content)} символов]"
+#             return content
 
-        elif action == "write":
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with open(p, 'w', encoding='utf-8') as f:
-                f.write(content or "")
-            return f"Файл {path} успешно записан."
+#         elif action == "write":
+#             p.parent.mkdir(parents=True, exist_ok=True)
+#             with open(p, 'w', encoding='utf-8') as f:
+#                 f.write(content or "")
+#             return f"Файл {path} успешно записан."
 
-        elif action == "move":
-            if not destination: return "Ошибка: Укажите 'destination' для перемещения."
-            dest_path = Path(destination)
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            p.rename(dest_path)
-            return f"Перемещено из {path} в {destination}."
+#         elif action == "move":
+#             if not destination: return "Ошибка: Укажите 'destination' для перемещения."
+#             dest_path = Path(destination)
+#             dest_path.parent.mkdir(parents=True, exist_ok=True)
+#             p.rename(dest_path)
+#             return f"Перемещено из {path} в {destination}."
 
-        elif action == "delete":
-            if p.is_dir():
-                import shutil
-                shutil.rmtree(p)
-            else:
-                p.unlink()
-            return f"Объект {path} удален."
+#         elif action == "delete":
+#             if p.is_dir():
+#                 import shutil
+#                 shutil.rmtree(p)
+#             else:
+#                 p.unlink()
+#             return f"Объект {path} удален."
 
-        return "Ошибка: Неизвестное действие."
+#         return "Ошибка: Неизвестное действие."
 
-    except Exception as e:
-        return f"Ошибка при работе с файлом: {str(e)}"
+#     except Exception as e:
+#         return f"Ошибка при работе с файлом: {str(e)}"
     
 MAX_PDF_CHARS = 60_000
 
