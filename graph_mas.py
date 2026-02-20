@@ -1,4 +1,3 @@
-import os
 import re
 import json
 from dotenv import load_dotenv
@@ -38,7 +37,7 @@ class MainState(TypedDict):
     selected_paper_path: Optional[str]
     paper_content: Optional[str]
     base64_img: Optional[str]
-    image_description: Optional[str]
+    # image_description: Optional[str]
     review_data: Optional[PaperReview]
     written_review: Optional[str]
     next_node: Literal["coordinator", "describe", "eval", "writer", "end"]
@@ -48,7 +47,7 @@ class GraphMAS:
         self.date = date.today().isoformat()
         
         self.coordinator_agent = CoordinatorAgent()
-        self.describe_agent = DescribeAgent()
+        # self.describe_agent = DescribeAgent()
         self.review_agent = EvalAgent()
         self.writer_agent = WriterAgent()
 
