@@ -8,6 +8,7 @@ from datetime import datetime
 import arxiv
 from langchain.tools import tool
 import pymupdf4llm
+import fitz
 from pathlib import Path
 
 DOWNLOAD_DIR = Path("./downloads")
@@ -238,21 +239,246 @@ def download_arxiv_tex(arxiv_id: str) -> str:
 
 #     except Exception as e:
 #         return f"Ошибка при работе с файлом: {str(e)}"
-    
-MAX_PDF_CHARS = 60_000
+
 
 @tool("parse_pdf_file")
 def parse_pdf_file(pdf_path: str) -> str:
     """
     Parses a PDF file and extracts its text content.
     Returns up to 60 000 characters to avoid context window overflow.
-    
+
     Args:
         pdf_path: The path to the PDF file to be parsed.
     """
-    
+
     markdown_text = pymupdf4llm.to_markdown(pdf_path)
-    if len(markdown_text) > MAX_PDF_CHARS:
-        markdown_text = markdown_text[:MAX_PDF_CHARS] + f"\n\n[...текст обрезан, показано {MAX_PDF_CHARS} из {len(markdown_text)} символов]"
     return markdown_text
+
+@tool("list_tex_images")
+def list_tex_images(tex_path: str) -> str:
+    """
+    List all image files in a LaTeX paper directory.
     
+    Args:
+        tex_path: Path to the directory with LaTeX files (e.g., /downloads/1234.5678_tex)
+    
+    Returns:
+        List of image file paths (one per line)
+    """
+    p = Path(tex_path)
+    
+    try:
+        if not p.exists():
+            return f"Ошибка: Путь {p} не существует."
+        
+        if p.is_file():
+            return f"Ошибка: {p} — это файл, а не папка."
+        
+        image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf"}
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(p.glob(f"**/*{ext}"))
+        
+        if not image_files:
+            return "Изображения не найдены в папке."
+        
+        lines = [f"Найдено изображений: {len(image_files)}"]
+        for img in image_files:
+            lines.append(f"Full: {img.absolute()}")
+        
+        return "\n".join(lines)
+    
+    except Exception as e:
+        return f"Ошибка: {str(e)}"
+
+@tool("list_tex_files")
+def list_tex_files(tex_path: str) -> str:
+    """
+    List all .tex files in a LaTeX paper directory.
+
+    Args:
+        tex_path: Path to the directory with LaTeX files (e.g., /downloads/1234.5678_tex)
+
+    Returns:
+        List of .tex file paths (one per line), with main file marked
+    """
+    p = Path(tex_path)
+
+    try:
+        if not p.exists():
+            return f"Ошибка: Путь {p} не существует."
+
+        if p.is_file():
+            return f"Ошибка: {p} — это файл, а не папка."
+
+        tex_files = list(p.glob("**/*.tex"))
+
+        if not tex_files:
+            return ".tex файлы не найдены в папке."
+
+        main_tex = None
+        for tf in tex_files:
+            try:
+                with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
+                    preview = f.read(2000).lower()
+                    if '\\documentclass' in preview or '\\begin{document}' in preview:
+                        main_tex = tf
+                        break
+            except:
+                continue
+
+        lines = [f"Найдено .tex файлов: {len(tex_files)}"]
+        for tf in tex_files:
+            marker = " <-- ГЛАВНЫЙ (main)" if tf == main_tex else ""
+            lines.append(f"Full: {tf.absolute()}{marker}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Ошибка: {str(e)}"
+
+@tool("parse_tex_file")
+def parse_tex_file(tex_path: str) -> str:
+    """
+    Parse LaTeX files and extract text content from a paper.
+
+    Automatically finds the main .tex file (or merges all .tex files if main not found).
+    Strips heavy LaTeX preamble to save tokens.
+
+    Args:
+        tex_path: Path to the DIRECTORY with LaTeX files (e.g., '/downloads/2401.02954_tex').
+                  The tool will automatically find the main .tex file.
+                  Do NOT pass a specific .tex file path — just pass the directory.
+
+    Returns:
+        Extracted text content from the main .tex file.
+    """
+    p = Path(tex_path)
+
+    try:
+        if p.is_file():
+            if p.suffix.lower() != '.tex':
+                return f"Ошибка: {p} не является .tex файлом."
+            tex_files = [p]
+            tex_dir = p.parent
+        else:
+            if not p.exists():
+                return f"Ошибка: Путь {p} не найден."
+            if p.is_dir():
+                tex_files = list(p.glob("**/*.tex"))
+                tex_dir = p
+            else:
+                return f"Ошибка: {p} не является файлом или папкой."
+
+        if not tex_files:
+            return "Ошибка: .tex файлы не найдены."
+
+        main_tex = None
+        for tf in tex_files:
+            try:
+                with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
+                    preview = f.read(2000).lower()
+                    if '\\documentclass' in preview or '\\begin{document}' in preview:
+                        main_tex = tf
+                        break
+            except:
+                continue
+
+        if main_tex:
+            tex_files_to_read = [main_tex]
+            print(f"[parse_tex_file] Found main file: {main_tex.name}")
+        else:
+            tex_files_to_read = tex_files
+            print(f"[parse_tex_file] No main file found, merging {len(tex_files)} files")
+
+        all_content = []
+        for tf in tex_files_to_read:
+            try:
+                with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    if '\\begin{document}' in content:
+                        content = content[content.find('\\begin{document}'):]
+                    all_content.append(f"\n\n%%% FILE: {tf.name} %%%\n{content}")
+            except Exception as e:
+                print(f"[parse_tex_file] Warning: Could not read {tf.name}: {e}")
+
+        if not all_content:
+            return "Ошибка: Не удалось прочитать содержимое .tex файлов."
+
+        merged_content = "\n".join(all_content)
+
+        # Apply character limit to avoid context window overflow
+        # MAX_TEX_CHARS = 60_000
+        # if len(merged_content) > MAX_TEX_CHARS:
+        #     merged_content = merged_content[:MAX_TEX_CHARS] + f"\n\n[...обрезано, показано {MAX_TEX_CHARS} из {len(merged_content)} символов]"
+
+        return merged_content
+
+    except Exception as e:
+        return f"Ошибка: {str(e)}. Проверь результат list_tex_images, чтобы увидеть доступные файлы."
+
+@tool("parse_img_from_pdf")
+def parse_img_from_pdf(path_to_pdf: str) -> str:
+    """
+    Extracts all images from a PDF file and saves them to a dedicated folder
+    using the original PDF filename.
+
+    Args:
+        path_to_pdf: Path to the source PDF file.
+
+    Returns:
+        A message with the paths to all extracted images or an error message.
+    """
+    base_path = Path(path_to_pdf)
+    output_folder = Path("/Users/switchblade/Documents/vs_code/science_helpy_3/extracted_images")
+
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    # Create a subfolder for this specific PDF
+    pdf_name = base_path.stem  # filename without extension
+    pdf_output_folder = output_folder / pdf_name
+    pdf_output_folder.mkdir(exist_ok=True)
+
+    try:
+        doc = fitz.open(str(base_path))
+        if len(doc) == 0:
+            return f"Error: The PDF file {base_path.name} is empty."
+
+        saved_images = []
+        image_counter = 0
+
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            image_list = page.get_images(full=True)
+
+            for img_idx, img_info in enumerate(image_list):
+                xref = img_info[0]
+                
+                try:
+                    pix = fitz.Pixmap(doc, xref)
+                    
+                    # Determine file extension
+                    ext = "png"
+                    if pix.n - pix.alpha > 3:  # CMYK or other
+                        pix = fitz.Pixmap(fitz.csRGB, pix)
+                    
+                    image_counter += 1
+                    image_filename = f"{pdf_name}_page{page_num + 1}_img{image_counter}.{ext}"
+                    save_path = pdf_output_folder / image_filename
+                    
+                    pix.save(str(save_path))
+                    saved_images.append(str(save_path))
+                    
+                except Exception as e:
+                    print(f"Warning: Could not extract image {img_idx} from page {page_num}: {e}")
+
+        doc.close()
+
+        if not saved_images:
+            return f"No images found in {base_path.name}."
+
+        saved_list = "\n".join(saved_images)
+        return f"Successfully extracted {len(saved_images)} image(s) to:\n{saved_list}"
+
+    except Exception as e:
+        return f"An error occurred: {str(e)}"

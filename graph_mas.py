@@ -9,11 +9,13 @@ from langgraph.checkpoint.memory import MemorySaver
 from datetime import date
 import io
 from PIL import Image
+from pathlib import Path
 
-# from science_helpy_3.describe_agent import DescribeAgent
+from agents.describe_agent import DescribeAgent
 from agents.review_agent import EvalAgent
 from agents.writer_agent import WriterAgent
 from agents.coordinator_agent import CoordinatorAgent
+from agent_tools.tools import list_tex_images, parse_tex_file
 
 load_dotenv()
 
@@ -37,22 +39,24 @@ class MainState(TypedDict):
     selected_paper_path: Optional[str]
     paper_content: Optional[str]
     base64_img: Optional[str]
-    # image_description: Optional[str]
+    image_description: Optional[str]
+    all_image_descriptions: Optional[List[str]]
     review_data: Optional[PaperReview]
     written_review: Optional[str]
     next_node: Literal["coordinator", "describe", "eval", "writer", "end"]
+    extracted_images_path: Optional[str]
 
 class GraphMAS:
     def __init__(self):
         self.date = date.today().isoformat()
-        
+
         self.coordinator_agent = CoordinatorAgent()
-        # self.describe_agent = DescribeAgent()
+        self.describe_agent = DescribeAgent()
         self.review_agent = EvalAgent()
         self.writer_agent = WriterAgent()
 
         self.memory = MemorySaver()
-        
+
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -61,32 +65,36 @@ class GraphMAS:
         graph.add_node("coordinator_agent", self._run_coordinator_agent)
         graph.add_node("eval_agent", self._run_review_agent)
         graph.add_node("writer_agent", self._run_write_agent)
-        
+        graph.add_node("describe_images_for_eval", self._describe_images_for_eval)
+        graph.add_node("describe_images_for_write", self._describe_images_for_write)
+
         graph.add_edge(START, "coordinator_agent")
         graph.add_conditional_edges(
             "coordinator_agent",
             self._router,
             {
                 "coordinator_agent": "coordinator_agent",
-                "eval": "eval_agent",
-                "writer": "writer_agent",
+                "eval": "describe_images_for_eval",
+                "writer": "describe_images_for_write",
                 "end": END
             }
         )
+        graph.add_edge("describe_images_for_eval", "eval_agent")
+        graph.add_edge("describe_images_for_write", "writer_agent")
         graph.add_edge("eval_agent", "coordinator_agent")
         graph.add_edge("writer_agent", END)
-        
+
         return graph.compile(checkpointer=self.memory)
        
     
     def _router(self, state: MainState) -> str:
         last_message = state["messages"][-1]
         content = last_message.content.upper()
-        
+
         if "[EVAL]" in content:
             destination = "eval"
-        # elif "[DESCRIBE]" in content:
-        #     destination = "describe"
+        elif "[DESCRIBE]" in content:
+            destination = "describe"
         elif "[WRITE]" in content:
             destination = "writer"
         elif "[END]" in content:
@@ -101,14 +109,28 @@ class GraphMAS:
     def _extract_tool_results(self, messages: list) -> dict:
         paper_content = None
         selected_paper_path = None
+        extracted_images_path = None
 
         for msg in messages:
             if not isinstance(msg, ToolMessage):
                 continue
             tool_name = getattr(msg, "name", None)
 
-            if tool_name == "parse_pdf_file" and msg.content:
+            if tool_name in ("parse_pdf_file", "parse_tex_file") and msg.content:
                 paper_content = msg.content
+
+            elif tool_name == "parse_img_from_pdf" and msg.content:
+                # Extract folder path from parse_img_from_pdf result
+                # Format: "Successfully extracted X image(s) to:\n/path/to/folder/img1.png\n/path/to/folder/img2.png"
+                if "successfully extracted" in msg.content.lower():
+                    # Get the folder path from the first image path
+                    lines = msg.content.split("\n")
+                    for line in lines:
+                        if "/extracted_images/" in line and line.strip().endswith(".png"):
+                            # Extract folder path
+                            img_path = line.strip()
+                            extracted_images_path = str(Path(img_path).parent)
+                            break
 
             elif tool_name == "download_arxiv_paper" and msg.content:
                 try:
@@ -120,7 +142,11 @@ class GraphMAS:
                     if match:
                         selected_paper_path = match.group(1)
 
-        return {"paper_content": paper_content, "selected_paper_path": selected_paper_path}
+        return {
+            "paper_content": paper_content,
+            "selected_paper_path": selected_paper_path,
+            "extracted_images_path": extracted_images_path
+        }
 
     _COORD_MESSAGE_WINDOW = 10
 
@@ -172,6 +198,7 @@ class GraphMAS:
     def _run_coordinator_agent(self, state: MainState) -> MainState:
         paper_content = state.get("paper_content")
         selected_paper_path = state.get("selected_paper_path")
+        extracted_images_path = state.get("extracted_images_path")
 
         messages_for_coord = self._build_coord_context(state)
         coord_state = {"messages": messages_for_coord}
@@ -181,11 +208,14 @@ class GraphMAS:
         extracted = self._extract_tool_results(result["messages"])
         new_paper_content = extracted["paper_content"] or paper_content
         new_paper_path = extracted["selected_paper_path"] or selected_paper_path
+        new_extracted_images_path = extracted.get("extracted_images_path") or extracted_images_path
 
         if extracted["paper_content"]:
             print(f"[graph] paper_content сохранён ({len(extracted['paper_content'])} символов)")
         if extracted["selected_paper_path"]:
             print(f"[graph] selected_paper_path: {extracted['selected_paper_path']}")
+        if extracted.get("extracted_images_path"):
+            print(f"[graph] extracted_images_path: {extracted['extracted_images_path']}")
 
         final_message = result["messages"][-1]
 
@@ -194,6 +224,7 @@ class GraphMAS:
             "messages": [final_message],
             "paper_content": new_paper_content,
             "selected_paper_path": new_paper_path,
+            "extracted_images_path": new_extracted_images_path,
         }
 
     def _run_write_agent(self, state: MainState) -> MainState:
@@ -231,6 +262,134 @@ class GraphMAS:
             "image_description": final_message.content,
         }
 
+    def _describe_images_for_eval(self, state: MainState) -> MainState:
+        """
+        Найти и описать все изображения в статье перед оценкой.
+        """
+        tex_path = state.get("selected_paper_path")
+        extracted_images_path = state.get("extracted_images_path")
+        
+        if not tex_path and not extracted_images_path:
+            return {
+                **state,
+                "messages": [HumanMessage(content="Ошибка: путь к статье не найден.")],
+                "all_image_descriptions": [],
+            }
+
+        image_descriptions = []
+        image_paths = []
+
+        if extracted_images_path:
+            print(f"[graph] --> Использование изображений из PDF: {extracted_images_path}")
+            img_folder = Path(extracted_images_path).parent
+            if img_folder.exists():
+                for img_ext in ["*.png", "*.jpg", "*.jpeg"]:
+                    image_paths.extend(list(img_folder.glob(img_ext)))
+                image_paths = [str(p) for p in image_paths]
+                print(f"[graph] Найдено изображений в PDF folder: {len(image_paths)}")
+
+        if not image_paths and tex_path:
+            if "_tex" not in tex_path:
+                tex_path = tex_path.replace(".pdf", "_tex")
+
+            print(f"[graph] --> Поиск изображений для EVAL в {tex_path}")
+
+            images_result = list_tex_images.invoke({"tex_path": tex_path})
+            print(f"[graph] {images_result[:200]}")
+
+            if "Изображения не найдены" not in images_result and "Ошибка" not in images_result:
+                for line in images_result.split("\n"):
+                    if line.startswith("Full:"):
+                        image_paths.append(line.replace("Full:", "").strip())
+                print(f"[graph] Найдено изображений в TeX folder: {len(image_paths)}")
+
+        for i, img_path in enumerate(image_paths, 1):
+            print(f"[graph] --> Описание изображения {i}/{min(len(image_paths), 5)}")
+            try:
+                desc_state = {
+                    "messages": [HumanMessage(content="Опиши это изображение для научной статьи")],
+                    "base64_img": img_path,
+                }
+                result = self.describe_agent.run_with_state(desc_state)
+                desc = result["messages"][-1].content
+                image_descriptions.append(f"### Изображение {i} ({Path(img_path).name}):\n{desc}")
+            except Exception as e:
+                print(f"[graph] Ошибка описания изображения: {e}")
+                image_descriptions.append(f"### Изображение {i}: Ошибка описания ({e})")
+
+        print(f"[graph] <-- Описано изображений: {len(image_descriptions)}")
+
+        return {
+            **state,
+            "all_image_descriptions": image_descriptions,
+        }
+
+    def _describe_images_for_write(self, state: MainState) -> MainState:
+        """
+        Найти и описать все изображения в статье перед написанием обзора.
+        """
+        tex_path = state.get("selected_paper_path")
+        extracted_images_path = state.get("extracted_images_path")
+        
+        if not tex_path and not extracted_images_path:
+            return {
+                **state,
+                "messages": [HumanMessage(content="Ошибка: путь к статье не найден.")],
+                "all_image_descriptions": [],
+            }
+
+        image_descriptions = []
+        image_paths = []
+
+        # 1. Если есть изображения из PDF (extracted_images_path)
+        if extracted_images_path:
+            print(f"[graph] --> Использование изображений из PDF: {extracted_images_path}")
+            img_folder = Path(extracted_images_path).parent
+            if img_folder.exists():
+                for img_ext in ["*.png", "*.jpg", "*.jpeg"]:
+                    image_paths.extend(list(img_folder.glob(img_ext)))
+                image_paths = [str(p) for p in image_paths]
+                print(f"[graph] Найдено изображений в PDF folder: {len(image_paths)}")
+
+        # 2. Если есть TeX-директория — ищем изображения там
+        if not image_paths and tex_path:
+            if "_tex" not in tex_path:
+                tex_path = tex_path.replace(".pdf", "_tex")
+
+            print(f"[graph] --> Поиск изображений для WRITE в {tex_path}")
+
+            # Ищем изображения
+            images_result = list_tex_images.invoke({"tex_path": tex_path})
+            print(f"[graph] {images_result[:200]}")
+
+            if "Изображения не найдены" not in images_result and "Ошибка" not in images_result:
+                for line in images_result.split("\n"):
+                    if line.startswith("Full:"):
+                        image_paths.append(line.replace("Full:", "").strip())
+                print(f"[graph] Найдено изображений в TeX folder: {len(image_paths)}")
+
+        # Описываем каждое изображение (максимум 5)
+        for i, img_path in enumerate(image_paths[:5], 1):
+            print(f"[graph] --> Описание изображения {i}/{min(len(image_paths), 5)}")
+            try:
+                desc_state = {
+                    "messages": [HumanMessage(content="Опиши это изображение для научной статьи")],
+                    "base64_img": img_path,
+                }
+                result = self.describe_agent.run_with_state(desc_state)
+                desc = result["messages"][-1].content
+                image_descriptions.append(f"### Изображение {i} ({Path(img_path).name}):\n{desc}")
+            except Exception as e:
+                print(f"[graph] Ошибка описания изображения: {e}")
+                image_descriptions.append(f"### Изображение {i}: Ошибка описания ({e})")
+
+        print(f"[graph] <-- Описано изображений: {len(image_descriptions)}")
+
+        return {
+            **state,
+            "all_image_descriptions": image_descriptions,
+        }
+
     @staticmethod
     def _format_review(review_obj: PaperReview) -> str:
         pros = "\n".join(f"  + {p}" for p in review_obj.pros)
@@ -252,9 +411,19 @@ class GraphMAS:
 
     def _run_review_agent(self, state: MainState) -> MainState:
         paper_to_eval = state.get("paper_content") or state["messages"][-1].content
-        print(f"[graph] --> EvalAgent (текст: {len(paper_to_eval)} символов)")
+        image_descriptions = state.get("all_image_descriptions", [])
+        print(f"[graph] --> EvalAgent (текст: {len(paper_to_eval)} символов, изображений: {len(image_descriptions)})")
 
-        review_state = {"messages": paper_to_eval}
+        # Формируем объединённый контекст: сначала описания изображений, потом текст статьи
+        if image_descriptions:
+            combined_content = (
+                f"=== ОПИСАНИЯ ИЗОБРАЖЕНИЙ ({len(image_descriptions)} шт.) ===\n" + "\n\n".join(image_descriptions) +
+                f"\n\n=== ТЕКСТ СТАТЬИ ===\n{paper_to_eval}"
+            )
+        else:
+            combined_content = paper_to_eval + "\n\n[ПРИМЕЧАНИЕ: Изображения не найдены или не описаны]"
+
+        review_state = {"messages": combined_content}
         result = self.review_agent.run_with_state(review_state)
 
         review_obj = result.get("review")
@@ -270,8 +439,33 @@ class GraphMAS:
             "messages": [HumanMessage(content=review_text)],
             "review_data": review_obj,
         }
-        
-    
+
+    def _run_write_agent(self, state: MainState) -> MainState:
+        paper_text = state.get("paper_content") or state["messages"][-1].content
+        image_descriptions = state.get("all_image_descriptions", [])
+        print(f"[graph] --> WriterAgent (текст: {len(paper_text)} символов, изображений: {len(image_descriptions)})")
+
+        # Формируем объединённый контекст: сначала описания изображений, потом текст статьи
+        if image_descriptions:
+            combined_content = (
+                f"=== ОПИСАНИЯ ИЗОБРАЖЕНИЙ ({len(image_descriptions)} шт.) ===\n" + "\n\n".join(image_descriptions) +
+                f"\n\n=== ТЕКСТ СТАТЬИ ===\n{paper_text}"
+            )
+        else:
+            combined_content = paper_text + "\n\n[ПРИМЕЧАНИЕ: Изображения не найдены или не описаны]"
+
+        write_state = {"messages": [HumanMessage(content=combined_content)]}
+        result = self.writer_agent.run_with_state(write_state)
+
+        final_message = result["messages"][-1]
+        print(f"[graph] <-- WriterAgent завершил работу")
+
+        return {
+            **state,
+            "messages": [final_message],
+            "written_review": final_message.content,
+        }
+
     def run(self, user_query: str):
         initial_state = {
             "messages": [HumanMessage(content=user_query)],
@@ -285,9 +479,9 @@ class GraphMAS:
             initial_state,
             config={"configurable": {"thread_id": f"graph-mas-{self.date}"}}
         )
-        
+
         return result
-    
+
 if __name__ == "__main__":
     mas = GraphMAS()
     
